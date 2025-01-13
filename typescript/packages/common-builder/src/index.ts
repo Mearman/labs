@@ -1,15 +1,39 @@
-export { cell } from "./cell-proxy.js";
-export { lift, createNodeFactory as builtin, handler } from "./module.js";
-export { recipe } from "./recipe.js";
-export { fetchData, generateData, ifElse, str } from "./built-in.js";
+export { opaqueRef as cell, stream } from "./opaque-ref.js";
+export { Spell, doc, select, $, event } from "./spell.js";
 export {
-  ID,
+  createNodeFactory,
+  derive,
+  lift,
+  byRef,
+  handler,
+  isolated,
+  compute,
+  render,
+  // event,
+} from "./module.js";
+export {
+  recipe,
+  recipeFromFrame,
+  pushFrame,
+  pushFrameFromCause,
+  popFrame,
+  getTopFrame,
+} from "./recipe.js";
+export {
+  streamData,
+  fetchData,
+  llm,
+  navigateTo,
+  ifElse,
+  str,
+} from "./built-in.js";
+export {
   TYPE,
   NAME,
   UI,
-  type Value,
-  type CellProxy,
-  type CellProxyMethods,
+  type Opaque,
+  type OpaqueRef,
+  type OpaqueRefMethods,
   type Module,
   type Recipe,
   type Node,
@@ -18,15 +42,29 @@ export {
   type RecipeFactory,
   type NodeFactory,
   type ModuleFactory,
-  isCell,
+  isOpaqueRef,
+  toOpaqueRef,
   isModule,
   isRecipe,
   isAlias,
   isStreamAlias,
+  isStatic,
+  markAsStatic,
   type toJSON,
   type JSONValue,
-  type JSON,
+  type JSONSchema,
+  type Frame,
+  Static,
+  type UnsafeBinding,
+  unsafe_originalRecipe,
+  unsafe_parentRecipe,
+  unsafe_materializeFactory,
 } from "./types.js";
 
 // This should be a separate package, but for now it's easier to keep it here.
-export { getValueAtPath, setValueAtPath, deepEqual, createJsonSchema } from "./utils.js";
+export {
+  getValueAtPath,
+  setValueAtPath,
+  deepEqual,
+  createJsonSchema,
+} from "./utils.js";

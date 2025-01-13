@@ -41,7 +41,9 @@
         "./packages/common-frp:build",
         "./packages/common-frp-lit:build",
         "./packages/common-propagator:build",
+        "./packages/common-os-ui:build",
         "./packages/common-ui:build",
+        "./packages/common-system:build",
         "./packages/llm-client:build",
         "./common/data:build",
         "./common/io:build",
@@ -66,10 +68,11 @@
         "./packages/common-frp:clean",
         "./packages/common-frp-lit:clean",
         "./packages/common-propagator:clean",
+        "./packages/common-os-ui:clean",
         "./packages/common-ui:clean",
         "./packages/common-runner:clean",
         "./packages/common-builder:clean",
-        "./packages/planning-server:clean",
+        "./packages/common-system:clean",
         "./packages/llm-client:clean",
         "./common/data:clean",
         "./common/io:clean",
@@ -80,6 +83,11 @@
   },
   "dependencies": {
     "@commontools/runtime": "^0.0.1",
-    "@vue/reactivity": "^3.4.31"
+    "@vue/reactivity": "^3.4.31",
+    "merkle-reference": "^1.1.0",
+    "zod": "^3.24.1"
+  },
+  "optionalDependencies": {
+    "@rollup/rollup-linux-x64-gnu": "^4.28.0"
   }
 }

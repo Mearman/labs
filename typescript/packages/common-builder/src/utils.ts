@@ -1,27 +1,65 @@
+import { createShadowRef } from "./opaque-ref.js";
 import {
-  Value,
+  Opaque,
   Module,
   Recipe,
-  CellProxy,
-  isCell,
+  OpaqueRef,
+  NodeRef,
+  isOpaqueRef,
   JSONValue,
-  JSON,
+  JSONSchema,
   Alias,
   isAlias,
+  canBeOpaqueRef,
+  makeOpaqueRef,
+  isStatic,
+  markAsStatic,
+  isShadowRef,
+  isRecipe,
+  unsafe_originalRecipe,
 } from "./types.js";
+import { getTopFrame } from "./recipe.js";
 
-/** traverse a value, _not_ entering cells */
-export function traverseValue(value: Value<any>, fn: (value: any) => any) {
-  fn(value);
-  if (Array.isArray(value)) value.forEach((v) => traverseValue(v, fn));
-  else if (!isCell(value) && typeof value === "object" && value !== null)
-    for (const key in value as any) traverseValue(value[key], fn);
+/**
+ * Traverse a value, _not_ entering cells
+ *
+ * @param value - The value to traverse
+ * @param fn - The function to apply to each value, which can return a new value
+ * @returns Transformed value
+ */
+export function traverseValue(
+  value: Opaque<any>,
+  fn: (value: any) => any,
+): any {
+  const staticWrap = isStatic(value) ? markAsStatic : (v: any) => v;
+
+  // Perform operation, replaces value if non-undefined is returned
+  const result = fn(value);
+  if (result !== undefined) value = result;
+
+  // Traverse value
+  if (Array.isArray(value))
+    return staticWrap(value.map(v => traverseValue(v, fn)));
+  else if (
+    (!isOpaqueRef(value) &&
+      !canBeOpaqueRef(value) &&
+      !isShadowRef(value) &&
+      typeof value === "object" &&
+      value !== null) ||
+    isRecipe(value)
+  )
+    return staticWrap(
+      Object.fromEntries(
+        Object.entries(value).map(([key, v]) => [key, traverseValue(v, fn)]),
+      ),
+    );
+  else return staticWrap(value);
 }
 
 export function setValueAtPath(
   obj: any,
   path: PropertyKey[],
-  value: any
+  value: any,
 ): boolean {
   let parent = obj;
   for (let i = 0; i < path.length - 1; i++) {
@@ -81,28 +119,72 @@ export const deepEqual = (a: any, b: any): boolean => {
 };
 
 export function toJSONWithAliases(
-  value: Value<any>,
-  paths: Map<CellProxy<any>, PropertyKey[]>,
+  value: Opaque<any>,
+  paths: Map<OpaqueRef<any>, PropertyKey[]>,
   ignoreSelfAliases: boolean = false,
-  path: PropertyKey[] = []
+  path: PropertyKey[] = [],
+  processStatic = false,
 ): JSONValue | undefined {
-  if (isCell(value)) {
+  if (isStatic(value) && !processStatic)
+    return markAsStatic(
+      toJSONWithAliases(value, paths, ignoreSelfAliases, path, true),
+    );
+  // Convert regular cells to opaque refs
+  else if (canBeOpaqueRef(value)) value = makeOpaqueRef(value);
+  // Convert parent opaque refs to shadow refs
+  else if (isOpaqueRef(value) && value.export().frame !== getTopFrame())
+    value = createShadowRef(value);
+
+  if (isOpaqueRef(value) || isShadowRef(value)) {
     const pathToCell = paths.get(value);
     if (pathToCell) {
       if (ignoreSelfAliases && deepEqual(path, pathToCell)) return undefined;
 
       return {
-        $alias: { path: pathToCell as (string | number)[] },
+        $alias: {
+          ...(isShadowRef(value) ? { cell: value } : {}),
+          path: pathToCell as (string | number)[],
+        },
       } satisfies Alias;
     } else throw new Error(`Cell not found in paths`);
+  } else if (isAlias(value)) {
+    const alias = (value as Alias).$alias;
+    if (isShadowRef(alias.cell)) {
+      const cell = alias.cell.shadowOf;
+      if (cell.export().frame !== getTopFrame()) {
+        let frame = getTopFrame();
+        while (frame && frame.parent !== cell.export().frame)
+          frame = frame.parent;
+        if (!frame)
+          throw new Error(
+            `Shadow ref alias with parent cell not found in current frame`,
+          );
+        return value;
+      }
+      if (!paths.has(cell)) throw new Error(`Cell not found in paths`);
+      return {
+        $alias: {
+          path: [...paths.get(cell)!, ...alias.path] as (string | number)[],
+        },
+      } satisfies Alias;
+    } else if (!("cell" in alias) || typeof alias.cell === "number") {
+      return {
+        $alias: {
+          cell: (alias.cell ?? 0) + 1,
+          path: alias.path as (string | number)[],
+        },
+      } satisfies Alias;
+    } else {
+      throw new Error(`Invalid alias cell`);
+    }
   }
 
   if (Array.isArray(value))
-    return (value as Value<any>).map((v: Value<any>, i: number) =>
-      toJSONWithAliases(v, paths, ignoreSelfAliases, [...path, i])
+    return (value as Opaque<any>).map((v: Opaque<any>, i: number) =>
+      toJSONWithAliases(v, paths, ignoreSelfAliases, [...path, i]),
     );
 
-  if (typeof value === "object") {
+  if (typeof value === "object" || isRecipe(value)) {
     const result: any = {};
     let hasValue = false;
     for (const key in value as any) {
@@ -110,13 +192,15 @@ export function toJSONWithAliases(
         value[key],
         paths,
         ignoreSelfAliases,
-        [...path, key]
+        [...path, key],
       );
       if (jsonValue !== undefined) {
         result[key] = jsonValue;
         hasValue = true;
       }
     }
+
+    if (isRecipe(value)) result[unsafe_originalRecipe] = value;
 
     return hasValue || Object.keys(result).length === 0 ? result : undefined;
   }
@@ -126,26 +210,43 @@ export function toJSONWithAliases(
 
 export function createJsonSchema(
   defaultValues: any,
-  referenceValues: any
-): JSON {
-  function analyzeType(value: any, defaultValue: any): JSON {
+  referenceValues: any,
+): JSONSchema {
+  function analyzeType(value: any, defaultValue: any): JSONSchema {
     if (isAlias(value)) {
       const path = value.$alias.path;
       return analyzeType(
         getValueAtPath(defaultValues, path),
-        getValueAtPath(referenceValues, path)
+        getValueAtPath(referenceValues, path),
       );
     }
 
     const type = typeof (value ?? defaultValue);
-    const schema: JSON = {};
+    const schema: JSONSchema = {};
 
     switch (type) {
       case "object":
         if (Array.isArray(value ?? defaultValue)) {
           schema.type = "array";
           if ((value ?? defaultValue).length > 0) {
-            schema.items = analyzeType(value?.[0], defaultValue?.[0]);
+            let properties: { [key: string]: any } = {};
+            for (let i = 0; i < (value ?? defaultValue).length; i++) {
+              const item = value?.[i] ?? defaultValue?.[i];
+              if (typeof item === "object" && item !== null) {
+                Object.keys(item).forEach(key => {
+                  if (!(key in properties)) {
+                    properties[key] = analyzeType(
+                      value?.[i]?.[key],
+                      defaultValue?.[i]?.[key],
+                    );
+                  }
+                });
+              }
+            }
+            schema.items = {
+              type: "object",
+              properties,
+            };
           }
         } else if (value ?? defaultValue !== null) {
           schema.type = "object";
@@ -156,7 +257,7 @@ export function createJsonSchema(
           ])) {
             schema.properties[key] = analyzeType(
               value?.[key],
-              defaultValue?.[key]
+              defaultValue?.[key],
             );
           }
         } else {
@@ -171,7 +272,7 @@ export function createJsonSchema(
       case "undefined":
         break;
       default:
-        schema.type = type;
+        schema.type = type as JSONSchema["type"];
         break;
     }
 
@@ -187,7 +288,7 @@ export function createJsonSchema(
 
 export function moduleToJSON(module: Module) {
   return {
-    type: module.type,
+    ...module,
     implementation:
       typeof module.implementation === "function"
         ? module.implementation.toString()
@@ -197,8 +298,27 @@ export function moduleToJSON(module: Module) {
 
 export function recipeToJSON(recipe: Recipe) {
   return {
-    schema: recipe.schema,
-    initial: recipe.initial,
+    argumentSchema: recipe.argumentSchema,
+    resultSchema: recipe.resultSchema,
+    ...(recipe.initial ? { initial: recipe.initial } : {}),
+    result: recipe.result,
     nodes: recipe.nodes,
   };
+}
+
+export function connectInputAndOutputs(node: NodeRef) {
+  function connect(value: any): any {
+    if (canBeOpaqueRef(value)) value = makeOpaqueRef(value);
+    if (isOpaqueRef(value)) {
+      // Return shadow ref it this is a parent opaque ref. Note: No need to
+      // connect to the cell. The connection is there to traverse the graph to
+      // find all other nodes, but this points to the parent graph instead.
+      if (value.export().frame !== node.frame) return createShadowRef(value);
+      value.connect(node);
+    }
+    return undefined;
+  }
+
+  node.inputs = traverseValue(node.inputs, connect);
+  node.outputs = traverseValue(node.outputs, connect);
 }

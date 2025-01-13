@@ -1,63 +1,65 @@
 import { lift, createNodeFactory } from "./module.js";
-import { Value, NodeFactory, CellProxy } from "./types.js";
+import { Opaque, OpaqueRef, NodeFactory } from "./types.js";
 
-export function generateData<T>(
-  params: Value<{
-    prompt: string;
-    result?: T;
-    schema?: any;
+export const llm = createNodeFactory({
+  type: "ref",
+  implementation: "llm",
+}) as <T = string>(
+  params: Opaque<{
+    messages?: string[];
+    prompt?: string;
     system?: string;
-    mode?: "json" | "html";
-  }>
-): CellProxy<{ pending: boolean; result: T; partial: any; error: any }> {
-  generateDataFactory ||= createNodeFactory({
-    type: "builtin",
-    implementation: "generateData",
-  });
-  return generateDataFactory(params);
-}
+    stop?: string;
+    max_tokens?: number;
+  }>,
+) => OpaqueRef<{
+  pending: boolean;
+  result?: T;
+  partial?: string;
+  error: any;
+}>;
 
-export function fetchData<T>(
-  params: Value<{
+export const fetchData = createNodeFactory({
+  type: "ref",
+  implementation: "fetchData",
+}) as <T>(
+  params: Opaque<{
+    url: string;
+    mode?: "json" | "text";
+    options?: RequestInit;
+    result?: T;
+  }>,
+) => Opaque<{ pending: boolean; result: T; error: any }>;
+
+export const streamData = createNodeFactory({
+  type: "ref",
+  implementation: "streamData",
+}) as <T>(
+  params: Opaque<{
     url: string;
     options?: RequestInit;
     result?: T;
-  }>
-): Value<{ pending: boolean; result: T; error: any }> {
-  fetchDataFactory ||= createNodeFactory({
-    type: "builtin",
-    implementation: "fetchData",
-  });
-  return fetchDataFactory(params);
-}
+  }>,
+) => Opaque<{ pending: boolean; result: T; error: any }>;
 
-let fetchDataFactory:
-  | NodeFactory<
-      { url: string; options?: RequestInit; result?: any },
-      { pending: boolean; result: any; error: any }
-    >
-  | undefined = undefined;
-
-export function ifElse<T, U, V>(
-  condition: Value<T>,
-  ifTrue: Value<U>,
-  ifFalse: Value<V>
-): CellProxy<T extends true ? U : V> {
+export function ifElse<T = any, U = any, V = any>(
+  condition: Opaque<T>,
+  ifTrue: Opaque<U>,
+  ifFalse: Opaque<V>,
+): OpaqueRef<U | V> {
   ifElseFactory ||= createNodeFactory({
-    type: "builtin",
+    type: "ref",
     implementation: "ifElse",
   });
   return ifElseFactory([condition, ifTrue, ifFalse]);
 }
 
-let ifElseFactory: NodeFactory<[any, any, any], any> | undefined = undefined;
+let ifElseFactory: NodeFactory<[any, any, any], any> | undefined;
 
-let generateDataFactory:
-  | NodeFactory<
-      { prompt: string; result?: any; schema?: any; system?: string },
-      { pending: boolean; result: any; partial: any; error: any }
-    >
-  | undefined = undefined;
+export const navigateTo = createNodeFactory({
+  type: "ref",
+  implementation: "navigateTo",
+}) as (cell: OpaqueRef<any>) => OpaqueRef<string>;
 
 // Example:
 // str`Hello, ${name}!`
@@ -66,7 +68,7 @@ let generateDataFactory:
 export function str(
   strings: TemplateStringsArray,
   ...values: any[]
-): CellProxy<string> {
+): OpaqueRef<string> {
   const interpolatedString = ({
     strings,
     values,
@@ -76,7 +78,7 @@ export function str(
   }) =>
     strings.reduce(
       (result, str, i) => result + str + (i < values.length ? values[i] : ""),
-      ""
+      "",
     );
 
   return lift(interpolatedString)({ strings, values });

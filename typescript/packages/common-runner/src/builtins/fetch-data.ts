@@ -1,8 +1,7 @@
-import { type Node } from "@commontools/common-builder";
 import { cell, CellImpl, ReactivityLog } from "../cell.js";
-import { sendValueToBinding, findAllAliasedCells } from "../utils.js";
-import { schedule, Action } from "../scheduler.js";
-import { mapBindingsToCell } from "../utils.js";
+import { normalizeToCells } from "../utils.js";
+import { idle, type Action } from "../scheduler.js";
+import { refer } from "merkle-reference";
 
 /**
  * Fetch data from a URL.
@@ -10,35 +9,64 @@ import { mapBindingsToCell } from "../utils.js";
  * Returns the fetched result as `result`. `pending` is true while a request is pending.
  *
  * @param url - A cell containing the URL to fetch data from.
+ * @param mode - The mode to use for fetching data. Either `text` or `json`
+ *   default to `json` results.
  * @returns { pending: boolean, result: any, error: any } - As individual cells, representing `pending` state, final `result`, and any `error`.
  */
 export function fetchData(
-  recipeCell: CellImpl<any>,
-  { inputs, outputs }: Node
-) {
-  const inputBindings = mapBindingsToCell(inputs, recipeCell) as {
+  inputsCell: CellImpl<{
     url: string;
+    mode?: "text" | "json";
+    options?: { body?: any; method?: string; headers?: Record<string, string> };
     result?: any;
-  };
-  const inputsCell = cell(inputBindings);
+  }>,
+  sendResult: (result: any) => void,
+  _addCancel: (cancel: () => void) => void,
+  cause: CellImpl<any>[],
+  parentCell: CellImpl<any>,
+): Action {
+  const pending = cell(false, { fetchData: { pending: cause } });
+  const result = cell<any | undefined>(undefined, {
+    fetchData: { result: cause },
+  });
+  const error = cell<any | undefined>(undefined, {
+    fetchData: { error: cause },
+  });
+  const requestHash = cell<string | undefined>(undefined, {
+    fetchData: { requestHash: cause },
+  });
 
-  const pending = cell(false);
-  const result = cell<any | undefined>(undefined);
-  const error = cell<any | undefined>(undefined);
+  pending.sourceCell = parentCell;
+  result.sourceCell = parentCell;
+  error.sourceCell = parentCell;
+  requestHash.sourceCell = parentCell;
 
-  const resultCell = cell({
+  sendResult({
     pending,
     result,
     error,
+    requestHash,
   });
 
-  const outputBindings = mapBindingsToCell(outputs, recipeCell) as any[];
-  sendValueToBinding(recipeCell, outputBindings, resultCell);
-
   let currentRun = 0;
+  let previousCallHash: string | undefined = undefined;
 
-  const startFetch: Action = (log: ReactivityLog) => {
-    const { url } = inputsCell.getAsProxy([], log);
+  return (log: ReactivityLog) => {
+    const { url, mode, options } = inputsCell.getAsQueryResult([], log);
+
+    const hash = refer({
+      url: url ?? "",
+      mode: mode ?? "json",
+      options: options ?? {},
+    }).toString();
+
+    if (hash === previousCallHash || hash === requestHash.get()) return;
+    previousCallHash = hash;
+
+    const processResponse =
+      (mode || "json") === "json"
+        ? (r: Response) => r.json()
+        : (r: Response) => r.text();
 
     if (url === undefined) {
       pending.setAtPath([], false, log);
@@ -54,24 +82,33 @@ export function fetchData(
 
     const thisRun = ++currentRun;
 
-    fetch(url)
-      .then((response) => response.json())
-      .then((data) => {
+    fetch(url, options)
+      .then(processResponse)
+      .then(async (data) => {
         if (thisRun !== currentRun) return;
+
+        normalizeToCells(parentCell, data, undefined, log, {
+          fetchData: { url },
+          cause,
+        });
+
+        await idle();
 
         pending.setAtPath([], false, log);
         result.setAtPath([], data, log);
+        requestHash.setAtPath([], hash, log);
       })
-      .catch((err) => {
+      .catch(async (err) => {
         if (thisRun !== currentRun) return;
+
+        await idle();
 
         pending.setAtPath([], false, log);
         error.setAtPath([], err, log);
+
+        // TODO: Not writing now, so we retry the request after failure. Replace
+        // this with more fine-grained retry logic.
+        // requestHash.setAtPath([], hash, log);
       });
   };
-
-  schedule(startFetch, {
-    reads: findAllAliasedCells(inputBindings, recipeCell),
-    writes: findAllAliasedCells(outputBindings, recipeCell),
-  });
 }

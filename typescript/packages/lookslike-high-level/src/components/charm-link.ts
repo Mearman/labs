@@ -2,7 +2,7 @@ import { LitElement, html, css } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { render } from "@commontools/common-ui";
 import { NAME } from "../data.js";
-import { charmById, isReactive } from "@commontools/common-runner";
+import { RendererCell, effect } from "@commontools/common-runner";
 
 export const charmLink = render.view("common-charm-link", {
   charm: { type: "object" },
@@ -21,8 +21,8 @@ export class CommonCharmLink extends LitElement {
     }
   `;
 
-  @property({ type: Number })
-  charm: number | undefined = undefined;
+  @property({ type: Object })
+  charm: RendererCell<any> | undefined = undefined;
 
   @property({ type: String })
   name: string | undefined = undefined;
@@ -48,42 +48,42 @@ export class CommonCharmLink extends LitElement {
   }
 
   private maybeListenToName(skipUpdate = false) {
-    const charm = this.charm !== undefined && charmById.get(this.charm);
-    if (!charm) return;
+    if (!this.charm) return;
 
-    let name = charm.asSimpleCell().get()[NAME];
+    // Unsubscribe from previous listener
+    this.nameEffect?.();
+    this.nameEffect = undefined;
 
-    if (isReactive(name)) {
-      this.nameEffect = name.sink((name: string) => {
-        this.nameFromCharm = name;
-        if (!skipUpdate) this.requestUpdate();
-        skipUpdate = false;
-      });
-    } else {
-      this.nameEffect?.();
-      this.nameFromCharm = name;
-    }
+    let { [NAME]: name } = this.charm.get() ?? {};
+
+    effect(name, (name) => {
+      this.nameFromCharm = name as string;
+      if (!skipUpdate) this.requestUpdate();
+      skipUpdate = false;
+    });
   }
 
   handleClick(e: Event) {
     e.preventDefault();
     this.dispatchEvent(
       new CustomEvent("open-charm", {
-        detail: { charmId: this.charm },
+        detail: { charmId: JSON.stringify(this.charm!.entityId) },
         bubbles: true,
         composed: true,
-      })
+      }),
     );
   }
 
   override render() {
     if (this.charm === undefined) return html``;
-    const charm = charmById.get(this.charm);
-    if (!charm) return html`<div>⚠️ (unknown charm)</div>`;
 
     const name = this.name ?? this.nameFromCharm ?? "(unknown)";
     return html`
-      <a href="#${this.charm}" @click="${this.handleClick}">💎 ${name}</a>
+      <a
+        href="/charm/${JSON.stringify(this.charm.entityId)}"
+        @click="${this.handleClick}"
+        >💎 ${name}</a
+      >
     `;
   }
 }

@@ -1,16 +1,20 @@
+import "../../common-os-ui/src/static/main.css";
 export { components } from "@commontools/common-ui";
-import { run, CellImpl } from "@commontools/common-runner";
-import { CommonWindowManager } from "./components/window-manager.js";
+export { fab } from "@commontools/common-os-ui";
 export { components as myComponents } from "./components.js";
-import { charms, recipes, openCharm, type Charm } from "./data.js";
-import { home } from "./recipes/home.js";
-import { ID } from "@commontools/common-builder";
+import { setDebug } from "@commontools/common-html";
+import "./router.js";
+import './gmail.js'
 
-document.addEventListener("DOMContentLoaded", () => {
-  const windowManager = document.getElementById(
-    "window-manager"
-  )! as CommonWindowManager;
-  openCharm.set(windowManager.openCharm.bind(windowManager));
-  const homeCharm = run(home, { charms, recipes }) as CellImpl<Charm>;
-  windowManager.openCharm(homeCharm.get()[ID]);
-});
+setDebug(!!(import.meta as any).env.VITE_DEBUG);
+
+// src/main.js or src/main.ts
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register(
+    new URL("./synopsys.worker.ts", import.meta.url),
+    {
+      type: "module",
+      scope: "/data/",
+    },
+  );
+}

@@ -4,22 +4,17 @@ import {
   UI,
   NAME,
   lift,
-  generateData,
+  llm,
   handler,
+  ifElse,
   str,
-  cell,
   createJsonSchema,
+  cell,
 } from "@commontools/common-builder";
+import { z } from "zod";
+import { truncateAsciiArt } from "../loader.js";
 
-import { launch } from "../data.js";
-
-type Suggestion = {
-  behaviour: 'append' | 'fork',
-  prompt: string,
-}
-
-const formatData = lift(({ obj }) => {
-  console.log("stringify", obj);
+const stringify = lift(({ obj }) => {
   return JSON.stringify(obj, null, 2);
 });
 
@@ -27,196 +22,399 @@ const tap = lift((x) => {
   console.log(x, JSON.stringify(x, null, 2));
   return x;
 });
-
-const updateValue = handler<{ detail: { value: string } }, { value: string }>(
-  ({ detail }, state) => detail?.value && (state.value = detail.value),
-);
-
-const maybeHTML = lift(({ result, pending }) => {
-  if (pending) return `
-    <div style="display: flex; justify-content: center; align-items: center; height: 100vh;">
-      <div style="border: 4px solid #f3f3f3; border-top: 4px solid #3498db; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite;"></div>
-      <p style="margin-left: 10px; font-family: Arial, sans-serif;">Generating...</p>
-    </div>
-    <style>
-      @keyframes spin {
-        0% { transform: rotate(0deg); }
-        100% { transform: rotate(360deg); }
-      }
-    </style>
-  `;
-  return result?.html ?? `
-    <div style="display: flex; justify-content: center; align-items: center; height: 100vh;">
-      <span style="font-size: 40px;">❌</span>
-      <p style="margin-left: 10px; font-family: Arial, sans-serif; color: #e74c3c;">Error generating content</p>
-    </div>
-  `;
-});
-
-const viewSystemPrompt = lift(
-  ({ schema }) => `generate a complete HTML document within a html block , e.g.
-  \`\`\`html
-  ...
-  \`\`\`
-
-  This must be complete HTML.
-  Import Tailwind (include \`<script src="https://cdn.tailwindcss.com"></script>\`) and style the page using it. Use tasteful, minimal defaults with a consistent style but customize based on the request.
-  Import React (include \`
-    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
-    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-  \`) and write the app using it.
-
-  You may not use any other libraries unless requested by the user.
-
-  The document can and should make use of postMessage to read and write data from the host context. e.g.
-
-  document.addEventListener('DOMContentLoaded', function() {
-    console.log('Initialized!');
-
-    window.parent.postMessage({
-        type: 'subscribe',
-        key: 'exampleKey'
-      }, '*');
-
-    window.addEventListener('message', function(event) {
-      if (event.data.type === 'readResponse') {
-        // use response
-        console.log('readResponse', event.data.key,event.data.value);
-      } else if (event.data.type === 'update') {
-        // event.data.value is a JSON object already
-        // refer to schema for structure
-      ...
-    });
-  });
-
-  window.parent.postMessage({
-    type: 'write',
-    key: 'exampleKey',
-    value: 'Example data to write'
-  }, '*');
-
-  You can subscribe and unsubscribe to changes from the keys:
-
-  window.parent.postMessage({
-    type: 'subscribe',
-    key: 'exampleKey'
-  }, '*');
-
-  You receive 'update' messages with a 'key' and 'value' field.
-
-  window.parent.postMessage({
-    type: 'unsubscribe',
-    key: 'exampleKey',
-  }, '*');
-
-  <view-model-schema>
-    ${JSON.stringify(schema, null, 2)}
-  </view-model-schema>
-
-  It's best to access and manage each state reference seperately.`,
-);
-
-const deriveJsonSchema = lift(({ data, filter }) => {
-  const schema = createJsonSchema({}, data)?.["properties"];
+const deriveJsonSchema = lift(({ data }) => {
+  const realized = JSON.parse(JSON.stringify(data));
+  const schema = (createJsonSchema({}, realized) as any)?.["properties"];
   if (!schema) return {};
-
-  const filterKeys = (filter || "")
-    .split(",")
-    .map((key: string) => key.trim())
-    .filter(Boolean);
-
-  if (filterKeys.length === 0) return schema;
-
-  return Object.fromEntries(
-    Object.entries(schema).filter(([key]) => filterKeys.includes(key)),
-  );
-});
-
-const onInput = handler<KeyboardEvent, { value: string }>((input, state) => {
-  state.value = (input.target as HTMLTextAreaElement).value;
+  return schema;
 });
 
 const copy = lift(({ value }: { value: any }) => value);
 
 const addToPrompt = handler<
   { prompt: string },
-  { prompt: string; lastSrc: string; src: string, query: string }
+  { prompt: string; lastSrc: string; src: string; query: string }
 >((e, state) => {
   state.prompt += "\n" + e.prompt;
   state.lastSrc = state.src;
   state.query = state.prompt;
 });
 
-const acceptSuggestion = handler<
-  void,
-  { suggestion: Suggestion; prompt: string; lastSrc: string; src: string, query: string, data: any; }
->((_, state) => {
-  if (state.suggestion.behaviour === 'append') {
-    console.log(state.prompt, state.query, state.suggestion.prompt)
-    state.prompt += "\n" + state.suggestion.prompt;
-    state.lastSrc = state.src;
-    state.query = `${state.prompt}`;
-  } else if (state.suggestion.behaviour === 'fork') {
-    launch(iframe, { data: state.data, title: state.suggestion.prompt, prompt: state.suggestion.prompt });
+const Suggestion = z.object({
+  behaviour: z.enum(["append", "fork"]),
+  prompt: z.string(),
+});
+type Suggestion = z.infer<typeof Suggestion>;
+
+const prepSuggestions = lift(({ src, prompt, schema }) => {
+  if (!src) {
+    return {};
   }
+
+  let instructions = `Given the current prompt: "${prompt}"
+
+Suggest 3 prompts to enhance, refine or branch off into a new UI. Keep it simple these add or change a single feature.
+
+Do not ever exceed a single sentence. Prefer terse, suggestions that take one step.`;
+
+  return {
+    messages: [instructions, '```json\n{"suggestions":['],
+    system: `Suggest extensions to the UI either as modifications or forks off into new interfaces. Avoid bloat, focus on the user experience and creative potential.
+
+Using the following schema:
+<view-model-schema>
+${JSON.stringify(schema, null, 2)}
+</view-model-schema>
+
+And the current HTML:
+
+${src}
+
+Respond in a json block.
+
+\`\`\`json
+{
+  "suggestions": [
+    {
+      "behaviour": "append" | "fork",
+      "prompt": "string"
+    }
+  ]
+}
+\`\`\``,
+    stop: "```",
+  };
 });
 
-const buildUiPrompt = lift(({ prompt, lastSrc }) => {
+const grabSuggestions = lift<{ result?: string }, Suggestion[]>(
+  ({ result }) => {
+    if (!result) {
+      return [];
+    }
+    const jsonMatch = result.match(/```json\n([\s\S]+?)```/);
+    if (!jsonMatch) {
+      console.error("No JSON found in text:", result);
+      return [];
+    }
+    let rawData = JSON.parse(jsonMatch[1]);
+    let parsedData = Suggestion.array().safeParse(rawData["suggestions"] || []);
+    if (!parsedData.success) {
+      console.error("Invalid JSON:", parsedData.error);
+      return [];
+    }
+    return parsedData.data;
+  },
+);
+
+const getSuggestion = lift(
+  ({ suggestions, index }: { suggestions: Suggestion[]; index: number }) => {
+    return suggestions[index] || { behaviour: "", prompt: "" };
+  },
+);
+
+const responsePrefill = `<html>
+<head>
+<script src="https://cdn.tailwindcss.com"></script>
+<script crossorigin src="https://unpkg.com/react/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script>
+window.onerror = function(message, source, lineno, colno, error) {
+window.parent.postMessage({
+  type: 'error',
+  key: 'error-details',
+  value: {
+    message: message,
+    source: source,
+    lineno: lineno,
+    colno: colno,
+    error: error ? error.stack : null,
+    stacktrace: error && error.stack ? error.stack : new Error().stack
+  }
+}, '*');
+return false;
+};
+
+/* Access data by subscribing to it. Re-render whenever the data sends a new \`update\` message.
+Subscribing to a key will immediately send an \`update\` event that contains the current value.
+Future mutations will re-trigger \`update\`. */
+window.subscribeToKey = function(key) {
+  console.log('iframe: Subscribing to', key);
+  window.parent.postMessage({
+    type: 'subscribe',
+    key,
+  }, '*');
+}
+
+window.unsubscribeFromKey = function(key) {
+  console.log('iframe: unsubscribing to', key);
+  window.parent.postMessage({
+    type: 'unsubscribe',
+    key,
+  }, '*');
+}
+
+window.writeData = function(key, value) {
+  console.log('iframe: Writing data', key, value);
+  window.parent.postMessage({
+    type: 'write',
+    key,
+    value,
+  }, '*');
+}
+
+window.generateImage = function(prompt) {
+  return 'https://ct-img.m4ke.workers.dev/?prompt=' + encodeURIComponent(prompt);
+}
+
+
+/**
+ * Sends a request to the LLM API.
+ * @param {string} system - The system message for the LLM.
+ * @param {Array} messages - The array of messages for the LLM.
+ * @returns {Promise<any>} - The raw response from the LLM.
+ */
+window.sendLLMRequest = async function(system, messages) {
+  console.log('iframe: Asking LLM', system, messages);
+  const response = await fetch('http://localhost:5173/api/llm', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      messages: messages.map(m => ({ role: m.role, content: m.content })),
+      system: system,
+      model: "anthropic:claude-3-5-sonnet"
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(\`HTTP error! status: \${response.status}\`);
+  }
+
+  return await response.json();
+}
+
+/**
+ * Processes the LLM response based on the specified mode.
+ * @param {string} responseText - The raw response text from the LLM.
+ * @param {string} mode - The mode for processing the response: 'json', 'html', or 'text'.
+ * @returns {any} - The processed response.
+ */
+window.processLLMResponse = function(responseText, mode) {
+  switch (mode) {
+    case 'json':
+      try {
+        return JSON.parse(responseText);
+      } catch (e) {
+        const jsonMatch = responseText.match(/{[\\w\\W]+?}/);
+        if (jsonMatch) {
+          return JSON.parse(jsonMatch[1]);
+        }
+        throw new Error('Failed to parse JSON response');
+      }
+    case 'html':
+      const htmlMatch = responseText.match(/<html>(.*?)<\\/html>/);
+      return htmlMatch ? htmlMatch[1] : responseText;
+    default:
+      return responseText;
+  }
+}
+
+/**
+ * Sends a request to the LLM API and processes the response based on the specified mode.
+ * @param {string} system - The system message for the LLM.
+ * @param {Array} messages - The array of messages for the LLM.
+ * @param {string} mode - The mode for processing the response: 'json', 'html', or 'text'.
+ * @returns {Promise<any>} - The processed response from the LLM.
+ */
+window.llm = async function(system, messages, mode = 'text') {
+  const responseJson = await window.sendLLMRequest(system, messages);
+  const responseText = responseJson.content;
+  return window.processLLMResponse(responseText, mode);
+}
+</script>
+<title>`;
+
+const prepHTML = lift(({ prompt, schema, lastSrc, error }) => {
+  if (!prompt) {
+    return {};
+  }
+
   let fullPrompt = prompt;
   if (lastSrc) {
     fullPrompt += `\n\nHere's the previous HTML for reference:\n\`\`\`html\n${lastSrc}\n\`\`\``;
   }
-  return fullPrompt;
-});
 
-const buildSuggestionsPrompt = lift(({ src, prompt, schema }) => {
-  let fullPrompt = `Given the current prompt: "${prompt}"`;
-  fullPrompt += `\n\nGiven the following schema:\n<view-model-schema>\n${JSON.stringify(schema, null, 2)}\n</view-model-schema>`;
-  if (src) {
-    fullPrompt += `\n\nAnd the previous HTML:\n\`\`\`html\n${src}\n\`\`\``;
+  if (error.error) {
+    fullPrompt += `\n\nYou must fix this error in your existing code: <error>${JSON.stringify(error.detail)}</error>`;
   }
-  fullPrompt += `\n\nSuggest 3 prompts to enhancem, refine or branch off into a new UI. Keep it simple these add or change a single feature. Return the suggestions in a JSON block with the following structure:
-  \`\`\`json
-  {
-    "suggestions": [
-      {
-        "behaviour": "append" | "fork",
-        "prompt": "string"
+
+  return {
+    messages: [fullPrompt, "```html\n" + responsePrefill],
+    stop: "```",
+    system: `generate a complete HTML document within a html block , e.g.
+    \`\`\`html
+    ...
+    \`\`\`
+
+    This must be a complete HTML page.
+    Import Tailwind and style the page using it. Use tasteful, minimal defaults with a consistent style but customize based on the request.
+    Import React and write the app using it. Consult the rules of React closely to avoid common mistakes (effects running twice, undefined).
+
+    You may not use any other libraries unless requested by the user (in which case, use a CDN to import them)
+
+    Use your familiar set of functions to work with data from the host context.
+
+    \`\`\`js
+    function handleMessage(event) {
+      if (event.data.type === 'update') {
+        console.log('iframe: got updated', event.data.key, event.data.value);
+        // changed key is event.data.key
+        // data is event.data.value, already deserialized
       }
-    ]
-  }
-  \`\`\`
+    }
 
-  Do not ever exceed a single sentence. Prefer terse, suggestions that take one step.
-  `;
-  return fullPrompt;
+    useEffect(() => {
+      window.addEventListener('message', handleMessage, []);
+      return () => window.removeEventListener('message', handleMessage);
+    , []);
+    \`\`\`
+
+    Consider that _any_ data you request may be undefined at first, or may be updated at any time. You should handle this gracefully.
+
+    When using React ref's, always handle the undefined or null case. If you're using a ref for setup, include it the dependencies for useEffect.
+
+    <view-model-schema>
+      ${JSON.stringify(schema, null, 2)}
+    </view-model-schema>`,
+  };
 });
 
-const getSuggestions = lift(({ result }) => result?.suggestions ?? []);
+const grabHTML = lift<{ result?: string }, string | undefined>(({ result }) => {
+  if (!result) {
+    return;
+  }
+  const html = result.match(/```html\n([\s\S]+?)```/)?.[1];
+  if (!html) {
+    console.error("No HTML found in text", result);
+    return;
+  }
+  return html;
+});
 
-const getSuggestion = lift(({ suggestions, index }: { suggestions: Suggestion[], index: number }) => {
-  return suggestions[index] || { behaviour: '', prompt: '' };
+const tail = lift<
+  { pending: boolean; partial?: string; lines: number },
+  string
+>(({ pending, partial, lines }) => {
+  if (!partial || !pending) {
+    return "";
+  }
+  return partial.split("\n").slice(-lines).join("\n");
+});
+
+const dots = lift<{ pending: boolean; partial?: string }, string>(
+  ({ pending, partial }) => {
+    if (!partial || !pending) {
+      return "";
+    }
+    return truncateAsciiArt(partial.length / 3.0);
+  },
+);
+
+const progress = lift<{ pending: boolean; partial?: string }, number>(
+  ({ pending, partial }) => {
+    if (!partial || !pending) {
+      return 0;
+    }
+    return (partial.length - responsePrefill.length) / 2048.0;
+  },
+);
+
+const buildTransformPrompt = lift(({ prompt, data }) => {
+  let fullPrompt = prompt;
+  if (data) {
+    fullPrompt += `\n\nHere's the previous JSON for reference:\n\`\`\`json\n${JSON.stringify(data, null, 2)}\n\`\`\``;
+  }
+
+  return {
+    messages: [fullPrompt, "```json\n"],
+    system: `Transform JSON document  as needed for the user to accomplish their goal, respond within a json block , e.g.
+\`\`\`json
+...
+\`\`\`
+
+No field can be set to null or undefined.`,
+    stop: "```",
+  };
+});
+
+const mostRelevantFields = lift(({ prompt, schema }) => {
+  let fullPrompt = prompt;
+  if (schema) {
+    fullPrompt += `\n\n<schema>\n\`\`\`json\n${JSON.stringify(schema, null, 2)}\n</schema>\`\`\``;
+  }
+
+  return {
+    messages: [fullPrompt, "```json\n"],
+    system: `Filter this JSON schema to include only the fields relevant to the user's task. Do not restructure or change the schema other than removing irrelevant details. However, if there is no current schema at all, imagine one. Respond with a valid JSON schema.`,
+    stop: "```",
+  };
+});
+
+const grabKeywords = lift<{ result?: string }, any>(({ result }) => {
+  if (!result) {
+    return [];
+  }
+  const jsonMatch = result.match(/```json\n([\s\S]+?)```/);
+  if (!jsonMatch) {
+    console.error("No JSON found in text:", result);
+    return [];
+  }
+  let rawData = JSON.parse(jsonMatch[1]);
+  return rawData;
+});
+
+const consoleLogHandler = handler<
+  { detail: any },
+  { error: any; lastSrc: string; src: string }
+>((event, state) => {
+  console.log("event", event);
+  state.lastSrc = state.src;
+  state.error.error = true;
+  state.error.detail = event.detail;
 });
 
 export const iframe = recipe<{
   title: string;
   prompt: string;
   data: any;
-  src: string;
-  filter: string;
-}>("iframe", ({ title, prompt, filter, data, src }) => {
+  src?: string;
+  filter?: string;
+}>("Iframe", ({ title, prompt, filter, data, src }) => {
   tap({ data });
   prompt.setDefault("");
   data.setDefault({});
   src.setDefault("");
 
+  const initialData = copy({ value: data });
+
   filter.setDefault("");
-  const schema = deriveJsonSchema({ data, filter });
+
+  // const transformedData = grabKeywords(
+  //   llm(buildTransformPrompt({ prompt, data: data })),
+  // );
+
+  const schema = deriveJsonSchema({ data: initialData });
   tap({ schema });
 
+  // const focusedSchema = grabKeywords(
+  //   llm(mostRelevantFields({ prompt, schema })),
+  // );
+
   const query = copy({ value: prompt });
-  const lastSrc = cell<string>();
+  const lastSrc = copy({ value: src });
+  const error = cell({ error: false, detail: {} });
 
   // const scopedSchema = generateData<{ html: string }>({
   //   prompt: promptFilterSchema({ schema, prompt }),
@@ -224,73 +422,46 @@ export const iframe = recipe<{
   //   mode: "json",
   // });
 
-  const { result: suggestionsResult } = generateData<{ suggestions: Suggestion[] }>({
-    prompt: buildSuggestionsPrompt({ src, prompt, schema }),
-    system: `Suggest extensions to the UI either as modifications or forks off into new interfaces. Avoid bloat, focus on the user experience and creative potential. Respond in a json block.`,
-    mode: "json",
+  // FIXME(ja): this html is a bit of a mess as changing src triggers suggestions and view (showing streaming)
+  const {
+    result,
+    pending: pendingHTML,
+    partial: partialHTML,
+  } = llm(prepHTML({ prompt, schema, lastSrc, error }));
+
+  const suggestions = grabSuggestions(
+    llm(prepSuggestions({ src: grabHTML({ result }), prompt, schema })),
+  );
+
+  const loadingProgress = progress({
+    partial: partialHTML,
+    pending: pendingHTML,
   });
-  const suggestions = getSuggestions({ result: suggestionsResult });
-  tap({ suggestions });
-
-  const { result: htmlResult, pending: htmlPending } = generateData<{ html: string }>({
-    prompt: buildUiPrompt({ prompt, lastSrc }),
-    system: viewSystemPrompt({ schema }),
-    mode: "html",
-  });
-
-  src = maybeHTML({ result: htmlResult, pending: htmlPending });
-
-  let firstSuggestion = getSuggestion({ suggestions, index: 0 });
-  let secondSuggestion = getSuggestion({ suggestions, index: 1 });
-  let thirdSuggestion = getSuggestion({ suggestions, index: 2 });
 
   return {
-    [NAME]: str`${title} - iframe`,
-    [UI]: html`<div>
-      <common-input
-        value=${title}
-        placeholder="title"
-        oncommon-input=${updateValue({ value: title })}
-      ></common-input>
-      <common-iframe src=${src} $context=${data}></common-iframe>
-      <details>
-        <summary>View Data</summary>
-        <common-input
-          value=${filter}
-          placeholder="Filter keys (comma-separated)"
-          oncommon-input=${updateValue({ value: filter })}
-        ></common-input>
-        <pre>${formatData({ obj: data })}</pre>
-      </details>
-      <details>
-        <summary>Edit Source</summary>
-        <textarea
-          value=${src}
-          onkeyup=${onInput({ value: src })}
-          style="width: 100%; min-height: 192px;"
-        ></textarea>
-      </details>
-
-      <textarea
-        value=${query}
-        onkeyup=${onInput({ value: query })}
-        style="width: 100%; min-height: 128px;"
-      ></textarea>
-
-      <button type="button"
-        onclick=${acceptSuggestion({ suggestion: firstSuggestion, prompt, src, lastSrc, query, data })}
-      >${firstSuggestion.behaviour} ${firstSuggestion.prompt}</button>
-      <button type="button"
-        onclick=${acceptSuggestion({ suggestion: secondSuggestion, prompt, src, lastSrc, query, data })}
-      >${secondSuggestion.behaviour} ${secondSuggestion.prompt}</button>
-      <button type="button"
-        onclick=${acceptSuggestion({ suggestion: thirdSuggestion, prompt, src, lastSrc, query, data })}
-      >${thirdSuggestion.behaviour} ${thirdSuggestion.prompt}</button>
+    [NAME]: str`${title} UI`,
+    [UI]: html`<div style="height: 100%">
+      ${ifElse(
+        grabHTML({ result }),
+        html`<common-iframe
+          src=${grabHTML({ result })}
+          onfix=${consoleLogHandler({ error, lastSrc, src })}
+          $context=${data}
+        ></common-iframe>`,
+        html`<common-ascii-loader
+          progress=${progress({ partial: partialHTML, pending: pendingHTML })}
+        ></common-ascii-loader>`,
+      )}
     </div>`,
+    icon: "preview",
     prompt,
     title,
-    src,
+    src: grabHTML({ result }),
     data,
+    schema,
+    partialHTML,
+    suggestions: { items: suggestions },
     addToPrompt: addToPrompt({ prompt, src, lastSrc, query }),
+    loadingProgress,
   };
 });

@@ -9,20 +9,61 @@ import {
   Child,
   isSection,
   getContext,
+  Binding,
 } from "./view.js";
 import {
   effect,
   isSendable,
   isReactive,
-} from "@commontools/common-propagator/reactive.js";
-import {
   useCancelGroup,
-  Cancel,
-} from "@commontools/common-propagator/cancel.js";
+  type Cancel,
+  type RendererCell,
+  ReactiveCell,
+  isRendererCell,
+} from "@commontools/common-runner";
+import { JSONSchema } from "@commontools/common-builder";
 import * as logger from "./logger.js";
 
-export const render = (parent: HTMLElement, view: View): Cancel => {
-  const { template, context } = view;
+const schema: JSONSchema = {
+  type: "object",
+  properties: {
+    type: { type: "string" },
+    // For VNode
+    name: { type: "string" },
+    props: {
+      type: "object",
+      additionalProperties: { asCell: true },
+    },
+    children: {
+      type: "array",
+      items: {
+        $ref: "#",
+        asCell: true,
+      },
+    },
+    // For View
+    template: { $ref: "#" },
+    context: {
+      type: "object",
+      additionalProperties: { asCell: true },
+    },
+  },
+};
+
+/** Render a view into a parent element */
+export const render = (
+  parent: HTMLElement,
+  view: View | VNode | RendererCell<View | VNode>,
+): Cancel => {
+  // If this is a reactive cell, ensure the schema is View | VNode
+  if (isRendererCell(view)) view = view.asSchema(schema);
+  return effect(view, (view: View | VNode) => renderImpl(parent, view));
+};
+
+export const renderImpl = (parent: HTMLElement, view: View | VNode): Cancel => {
+  let { template, context } = isVNode(view)
+    ? { template: view, context: {} }
+    : view;
   const [root, cancel] = renderNode(template, context);
   if (!root) {
     logger.warn("Could not render view", view);
@@ -37,7 +78,7 @@ export default render;
 
 const renderNode = (
   node: VNode,
-  context: Context
+  context: Context,
 ): [HTMLElement | null, Cancel] => {
   const [cancel, addCancel] = useCancelGroup();
 
@@ -61,14 +102,18 @@ const renderNode = (
 const bindChildren = (
   element: HTMLElement,
   children: Array<Child>,
-  context: Context
+  context: Context,
 ): Cancel => {
   const [cancel, addCancel] = useCancelGroup();
 
   for (const child of children) {
-    if (typeof child === "string") {
+    if (
+      typeof child === "string" ||
+      typeof child === "number" ||
+      typeof child === "boolean"
+    ) {
       // Bind static content
-      element.append(child);
+      element.append(child.toString());
     } else if (isVNode(child)) {
       // Bind static VNode
       const [childElement, cancel] = renderNode(child, context);
@@ -76,9 +121,11 @@ const bindChildren = (
       if (childElement) {
         element.append(childElement);
       }
-    } else if (isBinding(child)) {
+    } else if (isBinding(child) || isReactive(child)) {
       // Bind dynamic content
-      const replacement = getContext(context, child.path);
+      const replacement = isReactive(child as ReactiveCell<unknown>)
+        ? child
+        : getContext(context, child.path);
       // Anchor for reactive replacement
       let anchor: ChildNode = document.createTextNode("");
       let endAnchor: ChildNode | undefined = undefined;
@@ -111,11 +158,10 @@ const bindChildren = (
             replace(item);
           }
           anchor = originalAnchor;
-        } else if (isView(replacement)) {
-          const [childElement, cancel] = renderNode(
-            replacement.template,
-            replacement.context
-          );
+        } else if (isView(replacement) || isVNode(replacement)) {
+          const [childElement, cancel] = isView(replacement)
+            ? renderNode(replacement.template, replacement.context)
+            : renderNode(replacement, {});
           addCancel(cancel);
           if (childElement != null) {
             anchor.replaceWith(childElement);
@@ -124,6 +170,13 @@ const bindChildren = (
             logger.warn("Could not render view", replacement);
           }
         } else {
+          if (typeof replacement === "object") {
+            console.warn(
+              "unexpected object when value was expected",
+              replacement,
+            );
+            replacement = JSON.stringify(replacement);
+          }
           const text = document.createTextNode(`${replacement}`);
           anchor.replaceWith(text);
           anchor = text;
@@ -140,23 +193,29 @@ const bindChildren = (
 const bindProps = (
   element: HTMLElement,
   props: Props,
-  context: Context
+  context: Context,
 ): Cancel => {
   const [cancel, addCancel] = useCancelGroup();
-  console.log("binding props", element.tagName, props);
   for (const [propKey, propValue] of Object.entries(props)) {
-    if (isBinding(propValue)) {
-      const replacement = getContext(context, propValue.path);
+    if (
+      isBinding(propValue) ||
+      isReactive(propValue) ||
+      isSendable(propValue)
+    ) {
+      const replacement =
+        isReactive(propValue as ReactiveCell<unknown>) || isSendable(propValue)
+          ? propValue
+          : getContext(context, (propValue as Binding).path);
       // If prop is an event, we need to add an event listener
       if (isEventProp(propKey)) {
         if (!isSendable(replacement)) {
           throw new TypeError(
-            `Event prop "${propKey}" does not have a send method`
+            `Event prop "${propKey}" does not have a send method`,
           );
         }
         const key = cleanEventProp(propKey);
         if (key != null) {
-          const cancel = listen(element, key, (event) => {
+          const cancel = listen(element, key, event => {
             const sanitizedEvent = sanitizeEvent(event);
             replacement.send(sanitizedEvent);
           });
@@ -165,11 +224,12 @@ const bindProps = (
           logger.warn("Could not bind event", propKey, propValue);
         }
       } else if (propKey.startsWith("$")) {
-        console.log("binding context directly", propKey);
+        // Properties starting with $ get passed in as raw values, useful for
+        // e.g. passing a cell itself instead of its value.
         const key = propKey.slice(1);
         setProp(element, key, replacement);
       } else {
-        const cancel = effect(replacement, (replacement) => {
+        const cancel = effect(replacement, replacement => {
           // Replacements are set as properties not attributes to avoid
           // string serialization of complex datatypes.
           setProp(element, propKey, replacement);
@@ -177,7 +237,7 @@ const bindProps = (
         addCancel(cancel);
       }
     } else {
-      element.setAttribute(propKey, propValue);
+      setProp(element, propKey, propValue);
     }
   }
   return cancel;
@@ -196,7 +256,7 @@ const cleanEventProp = (key: string) => {
 const listen = (
   element: HTMLElement,
   key: string,
-  callback: (event: Event) => void
+  callback: (event: Event) => void,
 ) => {
   element.addEventListener(key, callback);
   return () => {

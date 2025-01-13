@@ -1,9 +1,13 @@
-import { type Recipe, type Node } from "@commontools/common-builder";
-import { cell, CellImpl, ReactivityLog } from "../cell.js";
-import { run } from "../runner.js";
-import { sendValueToBinding, findAllAliasedCells } from "../utils.js";
-import { schedule, Action } from "../scheduler.js";
-import { mapBindingsToCell } from "../utils.js";
+import { type Recipe } from "@commontools/common-builder";
+import {
+  cell,
+  CellImpl,
+  ReactivityLog,
+  getCellReferenceOrThrow,
+} from "../cell.js";
+import { run, cancels } from "../runner.js";
+import { type Action } from "../scheduler.js";
+import { type AddCancel } from "../cancel.js";
 
 /**
  * Implemention of built-in map module. Unlike regular modules, this will be
@@ -26,19 +30,28 @@ import { mapBindingsToCell } from "../utils.js";
  * @param op - A recipe to apply to each value.
  * @returns A cell containing the mapped values.
  */
-export function map(recipeCell: CellImpl<any>, { inputs, outputs }: Node) {
-  const inputBindings = mapBindingsToCell(inputs, recipeCell) as {
+export function map(
+  inputsCell: CellImpl<{
     list: any[];
     op: Recipe;
-  };
-  const outputBindings = mapBindingsToCell(outputs, recipeCell) as any[];
+  }>,
+  sendResult: (result: any) => void,
+  addCancel: AddCancel,
+  cause: any,
+  parentCell: CellImpl<any>,
+): Action {
+  const result = cell<any[]>([]);
+  result.generateEntityId({
+    map: parentCell.entityId,
+    op: inputsCell.getAsQueryResult([])?.op,
+    cause,
+  });
+  result.sourceCell = parentCell;
 
-  const inputsCell = cell(inputBindings);
-  const result = cell<any[] | undefined>(undefined);
-  const valueToResult: Map<any, CellImpl<any>> = new Map();
+  sendResult({ cell: result, path: [] });
 
-  const mapValuesToOp: Action = (log: ReactivityLog) => {
-    const { list, op } = inputsCell.getAsProxy([], log);
+  return (log: ReactivityLog) => {
+    let { list, op } = inputsCell.getAsQueryResult([], log);
 
     // If the list is undefined it means the input isn't available yet.
     // Correspondingly, the result should be []. TODO: Maybe it's important to
@@ -51,46 +64,40 @@ export function map(recipeCell: CellImpl<any>, { inputs, outputs }: Node) {
     if (!Array.isArray(list))
       throw new Error("map currently only supports arrays");
 
-    let previousResult = result.getAsProxy([]);
-    if (!Array.isArray(previousResult)) {
-      result.setAtPath([], [], log);
-      previousResult = [];
-    }
+    // // Hack to get to underlying array that lists cell references, etc.
+    const listRef = getCellReferenceOrThrow(list);
 
-    const seen = new Set<any>();
+    // Same for op, but here it's so that the proxy doesn't follow the aliases
+    // in the recipe instead of returning the recipe.
+    // TODO: Instead we should reify the recipe as a NodeFactory and teach the
+    // query result proxy to not enter those.
+    const opRef = getCellReferenceOrThrow(op);
+    op = opRef.cell.getAtPath(opRef.path);
 
     // Update values that are new or have changed
-    for (let index = 0; index < list.length; index++) {
-      const value = list[index];
+    for (let index = result.get().length; index < list.length; index++) {
 
-      if (previousResult[index] === value) return;
+      const resultCell = cell();
+      resultCell.generateEntityId({ result, index });
+      run(op, { element: { cell: listRef.cell, path: [...listRef.path, index] }, index, array: list }, resultCell);
+      resultCell.sourceCell!.sourceCell = parentCell;
 
-      if (typeof value !== "object")
-        throw new Error("map currently only supports objects");
-
-      // If the value is new, instantiate the recipe and store the result cell
-      if (!valueToResult.has(value)) {
-        const resultValue = run(op, value);
-        valueToResult.set(value, resultValue);
-      }
+      // TODO: Have `run` return cancel, once we make resultCell required
+      addCancel(cancels.get(resultCell));
 
       // Send the result value to the result cell
-      result.setAtPath([index], valueToResult.get(value), log);
-      seen.add(value);
+      result.setAtPath([index], { cell: resultCell, path: [] }, log);
     }
 
-    // Remove values that are no longer in the input
-    for (const value of valueToResult.keys()) {
-      if (!seen.has(value)) {
-        valueToResult.delete(value);
-      }
-    }
+    if (result.get().length > list.length)
+      result.setAtPath(["length"], list.length, log);
 
-    sendValueToBinding(recipeCell, outputBindings, result, log);
+    // NOTE: We leave prior results in the list for now, so they reuse prior
+    // runs when items reappear
+    //
+    // Remove values that are no longer in the input sourceRefToResult =
+    // sourceRefToResult.filter(({ ref }) => seen.find((seenValue) =>
+    // isEqualCellReferences(seenValue, ref))
+    //);
   };
-
-  schedule(mapValuesToOp, {
-    reads: findAllAliasedCells(inputBindings, recipeCell),
-    writes: findAllAliasedCells(outputBindings, recipeCell),
-  });
 }

@@ -4,12 +4,16 @@ import {
   UI,
   NAME,
   lift,
-  generateData,
+  llm,
   handler,
   str,
   createJsonSchema,
+  cell,
+  ifElse,
+  navigateTo,
 } from "@commontools/common-builder";
-
+import { truncateAsciiArt } from "../loader.js";
+import { prompt } from "./prompts.js";
 
 const formatData = lift(({ obj }) => {
   console.log("stringify", obj);
@@ -25,12 +29,58 @@ const updateTitle = handler<{ detail: { value: string } }, { title: string }>(
   ({ detail }, state) => detail?.value && (state.title = detail.value),
 );
 
-const systemPrompt = `generate/modify a document based on input, respond within a json block , e.g.
-  \`\`\`json
-  ...
-  \`\`\`
+const grabKeywords = lift<{ result?: string }, any>(({ result }) => {
+  if (!result) {
+    return [];
+  }
+  const jsonMatch = result.match(/```json\n([\s\S]+?)```/);
+  if (!jsonMatch) {
+    console.error("No JSON found in text:", result);
+    return [];
+  }
+  let rawData = JSON.parse(jsonMatch[1]);
+  return rawData;
+});
 
-  No field can be set to null or undefined.`;
+const buildPrompt = lift(({ prompt, data }) => {
+  let fullPrompt = prompt;
+  if (data) {
+    fullPrompt = `\n\nHere's the previous JSON for reference:\n\`\`\`json\n${JSON.stringify(
+      data,
+      null,
+      2,
+    )}\n\`\`\``;
+  }
+
+  return {
+    messages: [prompt, "data plz", fullPrompt, "```json\n"],
+    system: `You will transform JSON data as per the user's request, respond within a json block , e.g.
+\`\`\`json
+...
+\`\`\`
+
+If you would like to use generated images use the following URL:
+
+\`https://ct-img.m4ke.workers.dev/?prompt=<URL_ENCODED_PROMPT>\`
+
+No field can be set to null or undefined.`,
+    stop: "```",
+  };
+});
+
+const grabJSON = lift<{ result?: string }, any>(({ result }) => {
+  if (!result) {
+    return {};
+  }
+  const jsonMatch = result.match(/```json\n([\s\S]+?)```/);
+  if (!jsonMatch) {
+    console.error("No JSON found in text:", result);
+    return {};
+  }
+  let d = JSON.parse(jsonMatch[1]);
+  console.log("grabJSON", d);
+  return d;
+});
 
 const deriveJsonSchema = lift(({ data }) => {
   const schema = createJsonSchema({}, data)?.["properties"];
@@ -49,76 +99,73 @@ const addToPrompt = handler<
   { prompt: string },
   { prompt: string; query: string }
 >((e, state) => {
-  state.prompt += "\n" + e.prompt;
+  state.prompt = (state.prompt ? state.prompt + "\n" : "") + e.prompt;
   state.query = state.prompt;
 });
 
-const buildJSONGenPrompt = lift(({ prompt, data }) => {
-  console.log("prompt", prompt, data);
-  let fullPrompt = prompt;
-  if (data) {
-    fullPrompt += `\n\nHere's the previous JSON for reference:\n\`\`\`json\n${JSON.stringify(data, null, 2)}\n\`\`\``;
-  }
-  return fullPrompt;
+const onAcceptData = handler<
+  void,
+  { data: any; lastData: any; generatedData: any }
+>((_, state) => {
+  state.lastData = JSON.parse(JSON.stringify(state.data));
+  state.data = JSON.parse(JSON.stringify(state.generatedData));
 });
 
-const onAcceptData = handler<void, { data: any; lastData: any; result: any }>(
-  (_, state) => {
-    console.log("accept data", state.data, state.result);
-    state.lastData = JSON.parse(JSON.stringify(state.data));
-    state.data = JSON.parse(JSON.stringify(state.result))
+const tail = lift<
+  { pending: boolean; partial?: string; lines: number },
+  string
+>(({ pending, partial, lines }) => {
+  if (!partial || !pending) {
+    return "";
   }
+  return partial.split("\n").slice(-lines).join("\n");
+});
+
+const dots = lift<{ pending: boolean; partial?: string }, string>(
+  ({ pending, partial }) => {
+    if (!partial || !pending) {
+      return "";
+    }
+    return truncateAsciiArt(partial.length / 2.0);
+  },
 );
+
+const truncate = lift(({ text, length }) => {
+  return text.length > length ? text.substring(0, length) + "…" : text;
+});
 
 export const dataDesigner = recipe<{
   title: string;
   prompt: string;
   data: any;
-}>("iframe", ({ title, prompt, data }) => {
+}>("Data Designer", ({ title, prompt, data }) => {
   prompt.setDefault("");
-  data.setDefault({ key: 'value' });
+  data.setDefault({});
   title.setDefault("Untitled Data Designer");
 
   const schema = deriveJsonSchema({ data });
   const query = copy({ value: prompt });
-  const lastData = copy({ value: data });
-  lastData.setDefault({});
+  // using copy for lastData was causing re-running llm whenever data changed in iframes
+  const lastData = cell({ key: "value" });
   tap({ lastData });
 
-  const { result } = generateData<any>({
-    prompt: buildJSONGenPrompt({ prompt, data: lastData }),
-    system: systemPrompt,
-    mode: "json",
-  });
-  tap({ result })
+  const { result, pending, partial } = llm(buildPrompt({ prompt, data }));
+  const generatedData = grabJSON({ result });
 
   return {
     [NAME]: str`${title}`,
     [UI]: html`<div>
-      <common-input
-        value=${title}
-        placeholder="title"
-        oncommon-input=${updateTitle({ title })}
-      ></common-input>
-
-      <pre>${formatData({ obj: data })}</pre>
-      <pre>${formatData({ obj: schema })}</pre>
-
-      <textarea
-        value=${query}
-        onkeyup=${onInput({ value: query })}
-        style="width: 100%; min-height: 128px;"
-      ></textarea>
-
-      <pre>${formatData({ obj: result })}</pre>
-      <common-button
-        onclick=${onAcceptData({ data, lastData, result })}
-      >Accept</common-button>
-
+      ${ifElse(
+        pending,
+        html` <pre style="padding: 32px; color: #ccc; text-align: center;">
+${dots({ partial, pending })}</pre
+        >`,
+        html`<pre>${formatData({ obj: generatedData })}</pre>`,
+      )}
     </div>`,
     prompt,
     title,
-    data,
+    data: generatedData,
     addToPrompt: addToPrompt({ prompt, query }),
   };
 });

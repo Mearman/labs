@@ -2,7 +2,7 @@ import { LitElement, html } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { ref, createRef } from "lit/directives/ref.js";
 import { render, View } from "@commontools/common-html";
-import { charms, UI, annotationsEnabled, toggleAnnotations } from "../data.js";
+import { charms, UI, annotationsEnabled } from "../data.js";
 import {
   run,
   cell,
@@ -14,13 +14,13 @@ import { annotation } from "../recipes/annotation.js";
 @customElement("common-annotation-toggle")
 export class CommonAnnotationToggle extends LitElement {
   override render() {
-    return html`<div>
-      ${!annotationsEnabled.get() &&
-          html`<button @click=${toggleAnnotations}>
-            Enable Annotation Suggestions
-          </button>` || html`<div></div>`
-      }
-    </div>`;
+    return html`<div></div>`;
+    //   ${(!annotationsEnabled.get() &&
+    //     html`<button @click=${toggleAnnotations}>
+    //       Enable Annotation Suggestions
+    //     </button>`) ||
+    //   html`<div></div>`}
+    // </div>`;
   }
 
   override firstUpdated() {
@@ -72,7 +72,7 @@ export class CommonAnnotation extends LitElement {
 
       render(
         this.annotationRef.value,
-        this.annotation.asSimpleCell<{ [UI]: View }>().key(UI).get()
+        this.annotation.asRendererCell<{ [UI]: View }>().key(UI),
       );
     }
   }

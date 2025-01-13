@@ -1,11 +1,11 @@
 import { html } from "@commontools/common-html";
-import { recipe, lift, ID, UI } from "@commontools/common-builder";
+import { recipe, lift, UI } from "@commontools/common-builder";
 import { addSuggestion, description } from "../suggestions.js";
 import { type TodoItem } from "./todo-list.js";
 
 const getListSummary = lift((items: TodoItem[]) => {
   const notDoneTitles = items.flatMap((item) =>
-    item.done ? [] : [item.title]
+    item.done ? [] : [item.title],
   );
 
   return (
@@ -20,9 +20,9 @@ const getListSummary = lift((items: TodoItem[]) => {
 const allDone = lift((items: TodoItem[]) => items.every((item) => item.done));
 
 export const todoListAsTask = recipe<{
-  list: { [ID]: number; [UI]: any; items: TodoItem[] };
+  list: { [UI]: any; items: TodoItem[] };
   task: TodoItem;
-}>("todo list as task", ({ list, task }) => {
+}>("Todo List as Task", ({ list, task }) => {
   task.done = allDone(list.items);
 
   return {
@@ -30,7 +30,7 @@ export const todoListAsTask = recipe<{
       <summary>
         <common-vstack gap="sm">
           <span>${getListSummary(list.items)}</span>
-          <common-charm-link charm=${list[ID]} />
+          <common-charm-link $charm=${list} />
         </common-vstack>
       </summary>
       ${list[UI]}

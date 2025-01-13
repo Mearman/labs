@@ -11,6 +11,7 @@ import {
   queueEvent,
   EventHandler,
 } from "../src/scheduler.js";
+import { lift } from "@commontools/common-builder";
 
 describe("scheduler", () => {
   it("should run actions when cells change", async () => {
@@ -20,11 +21,11 @@ describe("scheduler", () => {
     const c = cell(0);
     const adder: Action = (log) => {
       runCount++;
-      c.asSimpleCell([], log).send(
-        a.getAsProxy([], log) + b.getAsProxy([], log)
+      c.asRendererCell([], log).send(
+        a.getAsQueryResult([], log) + b.getAsQueryResult([], log)
       );
     };
-    run(adder);
+    await run(adder);
     expect(runCount).toBe(1);
     expect(c.get()).toBe(3);
     a.send(2); // No log, simulate external change
@@ -40,8 +41,8 @@ describe("scheduler", () => {
     const c = cell(0);
     const adder: Action = (log) => {
       runCount++;
-      c.asSimpleCell([], log).send(
-        a.getAsProxy([], log) + b.getAsProxy([], log)
+      c.asRendererCell([], log).send(
+        a.getAsQueryResult([], log) + b.getAsQueryResult([], log)
       );
     };
     schedule(adder, {
@@ -66,11 +67,11 @@ describe("scheduler", () => {
     const c = cell(0);
     const adder: Action = (log) => {
       runCount++;
-      c.asSimpleCell([], log).send(
-        a.getAsProxy([], log) + b.getAsProxy([], log)
+      c.asRendererCell([], log).send(
+        a.getAsQueryResult([], log) + b.getAsQueryResult([], log)
       );
     };
-    run(adder);
+    await run(adder);
     expect(runCount).toBe(1);
     expect(c.get()).toBe(3);
 
@@ -86,6 +87,37 @@ describe("scheduler", () => {
     expect(c.get()).toBe(4);
   });
 
+  it("scheduler should return a cancel function", async () => {
+    let runCount = 0;
+    const a = cell(1);
+    const b = cell(2);
+    const c = cell(0);
+    const adder: Action = (log) => {
+      runCount++;
+      c.asRendererCell([], log).send(
+        a.getAsQueryResult([], log) + b.getAsQueryResult([], log)
+      );
+    };
+    const cancel = schedule(adder, {
+      reads: [
+        { cell: a, path: [] },
+        { cell: b, path: [] },
+      ],
+      writes: [{ cell: c, path: [] }],
+    });
+    expect(runCount).toBe(0);
+    expect(c.get()).toBe(0);
+    a.send(2);
+    await idle();
+    expect(runCount).toBe(1);
+    expect(c.get()).toBe(4);
+    cancel();
+    a.send(3);
+    await idle();
+    expect(runCount).toBe(1);
+    expect(c.get()).toBe(4);
+  });
+
   it("should run actions in topological order", async () => {
     let runs: string[] = [];
     const a = cell(1);
@@ -95,18 +127,18 @@ describe("scheduler", () => {
     const e = cell(0);
     const adder1: Action = (log) => {
       runs.push("adder1");
-      c.asSimpleCell([], log).send(
-        a.getAsProxy([], log) + b.getAsProxy([], log)
+      c.asRendererCell([], log).send(
+        a.getAsQueryResult([], log) + b.getAsQueryResult([], log)
       );
     };
     const adder2: Action = (log) => {
       runs.push("adder2");
-      e.asSimpleCell([], log).send(
-        c.getAsProxy([], log) + d.getAsProxy([], log)
+      e.asRendererCell([], log).send(
+        c.getAsQueryResult([], log) + d.getAsQueryResult([], log)
       );
     };
-    run(adder1);
-    run(adder2);
+    await run(adder1);
+    await run(adder2);
     expect(runs.join(",")).toBe("adder1,adder2");
     expect(c.get()).toBe(3);
     expect(e.get()).toBe(4);
@@ -132,33 +164,33 @@ describe("scheduler", () => {
     const d = cell(1);
     const e = cell(0);
     const adder1: Action = (log) => {
-      c.asSimpleCell([], log).send(
-        a.getAsProxy([], log) + b.getAsProxy([], log)
+      c.asRendererCell([], log).send(
+        a.getAsQueryResult([], log) + b.getAsQueryResult([], log)
       );
     };
     const adder2: Action = (log) => {
-      e.asSimpleCell([], log).send(
-        c.getAsProxy([], log) + d.getAsProxy([], log)
+      e.asRendererCell([], log).send(
+        c.getAsQueryResult([], log) + d.getAsQueryResult([], log)
       );
     };
     const adder3: Action = (log) => {
       if (--maxRuns <= 0) return;
-      c.asSimpleCell([], log).send(
-        e.getAsProxy([], log) + b.getAsProxy([], log)
+      c.asRendererCell([], log).send(
+        e.getAsQueryResult([], log) + b.getAsQueryResult([], log)
       );
     };
 
     const stopped = vi.fn();
     onError(() => stopped());
 
-    run(adder1);
-    run(adder2);
-    run(adder3);
+    await run(adder1);
+    await run(adder2);
+    await run(adder3);
 
-    expect(stopped).not.toHaveBeenCalled();
     await idle();
-    expect(stopped).toHaveBeenCalled();
+
     expect(maxRuns).toBeGreaterThan(0);
+    expect(stopped).toHaveBeenCalled();
   });
 
   it("should not loop on r/w changes on its own output", async () => {
@@ -166,13 +198,13 @@ describe("scheduler", () => {
     const by = cell(1);
     const inc: Action = (log) =>
       counter
-        .asSimpleCell([], log)
-        .send(counter.getAsProxy([], log) + by.getAsProxy([], log));
+        .asRendererCell([], log)
+        .send(counter.getAsQueryResult([], log) + by.getAsQueryResult([], log));
 
     const stopped = vi.fn();
     onError(() => stopped());
 
-    run(inc);
+    await run(inc);
     expect(counter.get()).toBe(1);
     await idle();
     expect(counter.get()).toBe(1);
@@ -182,6 +214,14 @@ describe("scheduler", () => {
     expect(counter.get()).toBe(3);
 
     expect(stopped).not.toHaveBeenCalled();
+  });
+
+  it("should immediately run actions that have no dependencies", async () => {
+    let runs = 0;
+    const inc: Action = () => runs++;
+    schedule(inc, { reads: [], writes: [] });
+    await idle();
+    expect(runs).toBe(1);
   });
 });
 
@@ -289,9 +329,9 @@ describe("event handling", () => {
 
     const action = (log: ReactivityLog) => {
       actionCount++;
-      lastEventSeen = eventResultCell.getAsProxy([], log);
+      lastEventSeen = eventResultCell.getAsQueryResult([], log);
     };
-    run(action);
+    await run(action);
 
     addEventHandler(eventHandler, { cell: eventCell, path: [] });
 
